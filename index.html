@@ -62,6 +62,19 @@
             try { localStorage.setItem(QUIZ_STORAGE_KEY, JSON.stringify(quizzes)); } catch (e) {}
         }
 
+        const HISTORY_STORAGE_KEY = "vocab_app_quiz_history_v1";
+        const MAX_HISTORY = 50;
+
+        function loadHistory() {
+            try {
+                const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
+                return raw ? JSON.parse(raw) : [];
+            } catch (e) { return []; }
+        }
+        function saveHistory(items) {
+            try { localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(items)); } catch (e) {}
+        }
+
         function generateHint(en) {
             return en.replace(/[a-zA-Z]+/g, (w) => w[0] + "_".repeat(Math.max(w.length - 1, 0)));
         }
@@ -88,6 +101,13 @@
         if (typeof window !== "undefined" && 'speechSynthesis' in window) {
             refreshVoices();
             window.speechSynthesis.onvoiceschanged = refreshVoices;
+            // Khắc phục lỗi Chrome tự động ngắt giọng đọc giữa chừng
+            setInterval(() => {
+                if (window.speechSynthesis.speaking) {
+                    window.speechSynthesis.pause();
+                    window.speechSynthesis.resume();
+                }
+            }, 4000);
         }
         function pickEnglishVoice() {
             const voices = cachedVoices.length ? cachedVoices : refreshVoices();
@@ -99,15 +119,54 @@
                 voices[0] || null
             );
         }
-        function speakWord(text, rate = 0.9) {
-            if (!('speechSynthesis' in window) || !text) return;
-            window.speechSynthesis.cancel();
+        function speakWord(text, rate = 0.95, onStart, onEnd) {
+            if (!('speechSynthesis' in window) || !text) { if (onEnd) onEnd(); return; }
+            const synth = window.speechSynthesis;
+            if (synth.speaking || synth.pending) synth.cancel();
+            if (synth.paused) synth.resume();
             const utter = new SpeechSynthesisUtterance(text);
             utter.lang = 'en-US';
             utter.rate = rate;
+            utter.pitch = 1;
             const voice = pickEnglishVoice();
             if (voice) utter.voice = voice;
-            window.speechSynthesis.speak(utter);
+            utter.onstart = () => onStart && onStart();
+            utter.onend = () => onEnd && onEnd();
+            utter.onerror = () => onEnd && onEnd();
+            // Nói ngay lập tức khi bấm; không có setTimeout hay độ trễ nhân tạo
+            synth.speak(utter);
+        }
+
+        // ---------- Âm thanh phản hồi đúng/sai (kiểu phổ biến trong app học tập) ----------
+        function playTone(freq, type, start, dur, ctx, peak = 0.22) {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = type;
+            osc.frequency.setValueAtTime(freq, start);
+            gain.gain.setValueAtTime(0.0001, start);
+            gain.gain.exponentialRampToValueAtTime(peak, start + 0.012);
+            gain.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+            osc.connect(gain).connect(ctx.destination);
+            osc.start(start);
+            osc.stop(start + dur + 0.02);
+        }
+        // Đúng: chuông "ting" 2 nốt đi lên (giống Duolingo/Kahoot)
+        function playCorrectSound() {
+            try {
+                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                const now = ctx.currentTime;
+                playTone(987.77, 'triangle', now, 0.14, ctx);       // B5
+                playTone(1318.51, 'triangle', now + 0.1, 0.22, ctx); // E6
+            } catch (e) {}
+        }
+        // Sai: buzzer trầm 2 nốt đi xuống (giống âm báo lỗi phổ biến)
+        function playWrongSound() {
+            try {
+                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                const now = ctx.currentTime;
+                playTone(196, 'square', now, 0.16, ctx, 0.15);
+                playTone(146.83, 'square', now + 0.14, 0.22, ctx, 0.15);
+            } catch (e) {}
         }
 
         // ---------- Chấm điểm phát âm (so khớp bản ghi giọng nói với từ gốc) ----------
@@ -178,7 +237,7 @@
                 return (
                     <div className="bg-red-50 border-b border-red-200 text-red-700 text-sm px-4 py-2 text-center">
                         <i className="fas fa-microphone-slash mr-2"></i>
-                        Bạn đã chặn quyền Micro nên không thể dùng chức năng luyện nói. Bấm vào biểu tượng ổ khóa 🔒 cạnh URL, bật lại quyền Micro rồi tải lại trang.
+                        Bạn đã chặn quyền Micro . Bấm vào biểu tượng ổ khóa cạnh URL, bật lại quyền Micro và tải lại trang để tận hưởng.
                     </div>
                 );
             }
@@ -257,14 +316,20 @@
 
         // ---------- Reusable: nút loa + luyện phát âm ----------
         function SpeakerButton({ word, size = "w-9 h-9", className = "" }) {
+            const [speaking, setSpeaking] = useState(false);
             return (
                 <button
                     type="button"
-                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); speakWord(word); }}
+                    onClick={(e) => {
+                        e.preventDefault(); e.stopPropagation();
+                        speakWord(word, 0.95, () => setSpeaking(true), () => setSpeaking(false));
+                    }}
                     title="Nghe phát âm"
-                    className={`${size} rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center hover:bg-indigo-200 active:scale-90 transition-all flex-shrink-0 ${className}`}
+                    className={`${size} rounded-full flex items-center justify-center active:scale-90 transition-all flex-shrink-0 ${
+                        speaking ? 'bg-indigo-500 text-white scale-110' : 'bg-indigo-100 text-indigo-600 hover:bg-indigo-200'
+                    } ${className}`}
                 >
-                    <i className="fas fa-volume-high"></i>
+                    <i className={`fas fa-volume-high ${speaking ? 'animate-pulse' : ''}`}></i>
                 </button>
             );
         }
@@ -334,9 +399,9 @@
                         <div className={`text-xs font-semibold px-2.5 py-1.5 rounded-lg border ${scoreColor}`}>
                             <span className="font-bold">{score}%</span> giống chuẩn
                             {score < 85 && (
-                                <span> · Bạn nói: "<span className="italic">{transcript || "..."}</span>". Đáp án đúng: <span className="font-bold">{word}</span> — bấm 🔊 để nghe lại rồi thử nói lại nhé!</span>
+                                <span> · Bạn nói: "<span className="italic">{transcript || "..."}</span>"</span>
                             )}
-                            {score >= 85 && <span> · Phát âm tốt lắm! 🎉</span>}
+                            {score >= 85 && <span> · Tốt lắm! 🎉</span>}
                         </div>
                     )}
                     {error && <p className="text-xs text-red-500">{error}</p>}
@@ -376,7 +441,7 @@
 
             return (
                 <div className="min-h-screen flex items-center justify-center p-4">
-                    <div className="bg-white p-6 md:p-10 rounded-2xl shadow-xl max-w-lg w-full card-pop">
+                    <div className="bg-white p-6 md:p-10 rounded-2xl shadow-xl max-w-2xl w-full card-pop">
                         <TopBar title="Luyện phát âm" onBack={onBack} />
                         <div className="w-full bg-gray-200 rounded-full h-2 mb-6">
                             <div className="bg-emerald-500 h-2 rounded-full transition-all duration-500" style={{ width: `${((idx + 1) / total) * 100}%` }}></div>
@@ -388,7 +453,7 @@
                         <div className="text-center mb-6">
                             <p className="text-sm text-gray-500 mb-1">{current.vi}</p>
                             <h3 className="text-4xl font-extrabold text-gray-800 mb-1">{current.en}</h3>
-                            <p className="text-xs text-gray-400">Bấm loa để nghe mẫu, bấm micro để nói lại</p>
+
                         </div>
 
                         <div key={idx} className="flex flex-col items-center gap-4 mb-6">
@@ -409,87 +474,86 @@
         }
 
         // ---------- Home Screen ----------
-        function Home({ wordCount, quizCount, onStart, onAdd, onManage, onCreateQuiz, onMyQuizzes, onPronounce }) {
+        function Home({ wordCount, quizCount, historyCount, onStart, onAdd, onManage, onCreateQuiz, onMyQuizzes, onPronounce, onWordList, onHistory }) {
+            const modes = [
+                { key: 'type', title: 'Gõ từ tiếng Anh', icon: 'fa-keyboard', color: 'indigo', onClick: () => onStart('type') },
+                { key: 'choice', title: 'Chọn nghĩa đúng', icon: 'fa-list-check', color: 'purple', onClick: () => onStart('choice') },
+                { key: 'image', title: 'Nhìn hình đoán từ', icon: 'fa-image', color: 'teal', onClick: () => onStart('image') },
+                { key: 'pronounce', title: 'Luyện phát âm', icon: 'fa-microphone-lines', color: 'emerald', onClick: onPronounce },
+            ];
+            const colorMap = {
+                indigo: 'bg-indigo-100 text-indigo-600 hover:border-indigo-200',
+                purple: 'bg-purple-100 text-purple-600 hover:border-purple-200',
+                teal: 'bg-teal-100 text-teal-600 hover:border-teal-200',
+                emerald: 'bg-emerald-100 text-emerald-600 hover:border-emerald-200',
+            };
+
             return (
-                <div className="min-h-screen flex items-center justify-center p-4">
-                    <div className="max-w-lg w-full">
-                        <div className="text-center mb-8">
-                            <div className="w-20 h-20 mx-auto mb-4 rounded-3xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-200">
-                                <i className="fas fa-graduation-cap text-3xl text-white"></i>
+                <div className="min-h-screen flex items-center justify-center p-4 md:p-10">
+                    <div className="max-w-6xl w-full">
+                        <div className="text-center mb-10">
+                            <div className="w-24 h-24 md:w-28 md:h-28 mx-auto mb-4 rounded-3xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-200">
+                                <i className="fas fa-graduation-cap text-4xl md:text-5xl text-white"></i>
                             </div>
-                            <h1 className="text-3xl font-extrabold text-gray-800">Học Từ Vựng</h1>
-                            <p className="text-gray-500 mt-1">Đang có <span className="font-bold text-indigo-600">{wordCount}</span> từ trong kho từ vựng của bạn</p>
+                            <h1 className="text-4xl md:text-6xl font-extrabold text-gray-800">Học Từ Vựng</h1>
+                            <p className="text-gray-500 mt-2 text-lg md:text-xl"><span className="font-bold text-indigo-600">{wordCount}</span> từ trong kho từ vựng</p>
                         </div>
 
-                        <div className="grid gap-4">
-                            <button onClick={() => onStart('type')} className="group bg-white p-5 rounded-2xl shadow-lg hover:shadow-xl transition-all flex items-center gap-4 text-left border-2 border-transparent hover:border-indigo-200">
-                                <div className="w-14 h-14 rounded-xl bg-indigo-100 flex items-center justify-center text-indigo-600 text-xl group-hover:scale-105 transition-transform">
-                                    <i className="fas fa-keyboard"></i>
-                                </div>
-                                <div className="flex-1">
-                                    <p className="font-bold text-gray-800">Gõ từ tiếng Anh</p>
-                                    <p className="text-sm text-gray-500">Xem nghĩa tiếng Việt, gõ lại từ tiếng Anh</p>
-                                </div>
-                                <i className="fas fa-chevron-right text-gray-300"></i>
-                            </button>
-
-                            <button onClick={() => onStart('choice')} className="group bg-white p-5 rounded-2xl shadow-lg hover:shadow-xl transition-all flex items-center gap-4 text-left border-2 border-transparent hover:border-purple-200">
-                                <div className="w-14 h-14 rounded-xl bg-purple-100 flex items-center justify-center text-purple-600 text-xl group-hover:scale-105 transition-transform">
-                                    <i className="fas fa-list-check"></i>
-                                </div>
-                                <div className="flex-1">
-                                    <p className="font-bold text-gray-800">Chọn nghĩa đúng</p>
-                                    <p className="text-sm text-gray-500">Nhìn từ tiếng Anh, chọn nghĩa tiếng Việt đúng</p>
-                                </div>
-                                <i className="fas fa-chevron-right text-gray-300"></i>
-                            </button>
-
-                            <button onClick={() => onStart('image')} className="group bg-white p-5 rounded-2xl shadow-lg hover:shadow-xl transition-all flex items-center gap-4 text-left border-2 border-transparent hover:border-teal-200">
-                                <div className="w-14 h-14 rounded-xl bg-teal-100 flex items-center justify-center text-teal-600 text-xl group-hover:scale-105 transition-transform">
-                                    <i className="fas fa-image"></i>
-                                </div>
-                                <div className="flex-1">
-                                    <p className="font-bold text-gray-800">Nhìn hình đoán từ</p>
-                                    <p className="text-sm text-gray-500">Xem hình ảnh, gõ từ tiếng Anh phù hợp</p>
-                                </div>
-                                <i className="fas fa-chevron-right text-gray-300"></i>
-                            </button>
-
-                            <button onClick={onPronounce} className="group bg-white p-5 rounded-2xl shadow-lg hover:shadow-xl transition-all flex items-center gap-4 text-left border-2 border-transparent hover:border-emerald-200">
-                                <div className="w-14 h-14 rounded-xl bg-emerald-100 flex items-center justify-center text-emerald-600 text-xl group-hover:scale-105 transition-transform">
-                                    <i className="fas fa-microphone-lines"></i>
-                                </div>
-                                <div className="flex-1">
-                                    <p className="font-bold text-gray-800">Luyện phát âm</p>
-                                    <p className="text-sm text-gray-500">Nghe mẫu, nói lại và được AI chấm điểm phát âm</p>
-                                </div>
-                                <i className="fas fa-chevron-right text-gray-300"></i>
-                            </button>
-
-                            <div className="grid grid-cols-2 gap-4 mt-2">
-                                <button onClick={onAdd} className="bg-white p-4 rounded-2xl shadow hover:shadow-lg transition-all flex flex-col items-center gap-2 text-emerald-600 border-2 border-transparent hover:border-emerald-200">
-                                    <i className="fas fa-plus-circle text-2xl"></i>
-                                    <span className="font-semibold text-sm text-gray-700">Thêm từ mới</span>
+                        {/* Chế độ luyện tập - bố cục ngang, 4 nút cùng hàng trên desktop */}
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 md:gap-5 mb-6">
+                            {modes.map(m => (
+                                <button key={m.key} onClick={m.onClick}
+                                    className={`group bg-white p-5 md:p-6 rounded-2xl shadow-lg hover:shadow-xl transition-all flex flex-col items-center gap-3 text-center border-2 border-transparent ${colorMap[m.color]}`}>
+                                    <div className={`w-16 h-16 md:w-20 md:h-20 rounded-2xl flex items-center justify-center text-2xl md:text-3xl flex-shrink-0 group-hover:scale-105 transition-transform ${colorMap[m.color].split(' ').slice(0,2).join(' ')}`}>
+                                        <i className={`fas ${m.icon}`}></i>
+                                    </div>
+                                    <p className="font-bold text-gray-800 text-base md:text-lg leading-snug">{m.title}</p>
                                 </button>
-                                <button onClick={onManage} className="bg-white p-4 rounded-2xl shadow hover:shadow-lg transition-all flex flex-col items-center gap-2 text-amber-600 border-2 border-transparent hover:border-amber-200">
-                                    <i className="fas fa-list-ul text-2xl"></i>
-                                    <span className="font-semibold text-sm text-gray-700">Quản lý từ đã thêm</span>
-                                </button>
+                            ))}
+                        </div>
+
+                        {/* Từ vựng, bộ đề, lịch sử - bố cục ngang trên desktop */}
+                        <div className="grid sm:grid-cols-3 gap-4">
+                            <div className="bg-white rounded-2xl shadow-lg p-5">
+                                <p className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-3">Từ vựng</p>
+                                <div className="grid grid-cols-3 gap-2">
+                                    <button onClick={onAdd} className="bg-gray-50 p-3 rounded-xl hover:bg-emerald-50 transition-colors flex flex-col items-center gap-1.5 text-emerald-600">
+                                        <i className="fas fa-plus-circle text-2xl"></i>
+                                        <span className="font-semibold text-sm text-gray-700">Thêm</span>
+                                    </button>
+                                    <button onClick={onManage} className="bg-gray-50 p-3 rounded-xl hover:bg-amber-50 transition-colors flex flex-col items-center gap-1.5 text-amber-600">
+                                        <i className="fas fa-pen-to-square text-2xl"></i>
+                                        <span className="font-semibold text-sm text-gray-700">Quản lý</span>
+                                    </button>
+                                    <button onClick={onWordList} className="bg-gray-50 p-3 rounded-xl hover:bg-indigo-50 transition-colors flex flex-col items-center gap-1.5 text-indigo-600">
+                                        <i className="fas fa-book text-2xl"></i>
+                                        <span className="font-semibold text-sm text-gray-700">Danh sách</span>
+                                    </button>
+                                </div>
                             </div>
 
-                            <div className="border-t border-gray-200 my-2 pt-4">
-                                <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Bộ đề riêng </p>
-                                <div className="grid grid-cols-2 gap-4">
-                                    <button onClick={onCreateQuiz} className="bg-white p-4 rounded-2xl shadow hover:shadow-lg transition-all flex flex-col items-center gap-2 text-rose-600 border-2 border-transparent hover:border-rose-200">
+                            <div className="bg-white rounded-2xl shadow-lg p-5">
+                                <p className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-3">Bộ đề riêng</p>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <button onClick={onCreateQuiz} className="bg-gray-50 p-3 rounded-xl hover:bg-rose-50 transition-colors flex flex-col items-center gap-1.5 text-rose-600">
                                         <i className="fas fa-wand-magic-sparkles text-2xl"></i>
-                                        <span className="font-semibold text-sm text-gray-700">Tạo đề riêng</span>
+                                        <span className="font-semibold text-sm text-gray-700">Tạo đề</span>
                                     </button>
-                                    <button onClick={onMyQuizzes} className="relative bg-white p-4 rounded-2xl shadow hover:shadow-lg transition-all flex flex-col items-center gap-2 text-sky-600 border-2 border-transparent hover:border-sky-200">
-                                        {quizCount > 0 && <span className="absolute -top-2 -right-2 bg-sky-500 text-white text-xs font-bold w-6 h-6 rounded-full flex items-center justify-center">{quizCount}</span>}
+                                    <button onClick={onMyQuizzes} className="relative bg-gray-50 p-3 rounded-xl hover:bg-sky-50 transition-colors flex flex-col items-center gap-1.5 text-sky-600">
+                                        {quizCount > 0 && <span className="absolute top-1 right-1 bg-sky-500 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center">{quizCount}</span>}
                                         <i className="fas fa-layer-group text-2xl"></i>
                                         <span className="font-semibold text-sm text-gray-700">Bộ đề của tôi</span>
                                     </button>
                                 </div>
+                            </div>
+
+                            <div className="bg-white rounded-2xl shadow-lg p-5">
+                                <p className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-3">Kết quả</p>
+                                <button onClick={onHistory} className="relative w-full h-[calc(100%-1.75rem)] bg-gray-50 p-3 rounded-xl hover:bg-violet-50 transition-colors flex flex-col items-center justify-center gap-1.5 text-violet-600">
+                                    {historyCount > 0 && <span className="absolute top-1 right-1 bg-violet-500 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center">{historyCount}</span>}
+                                    <i className="fas fa-clock-rotate-left text-2xl"></i>
+                                    <span className="font-semibold text-sm text-gray-700">Lịch sử làm bài</span>
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -546,21 +610,20 @@
 
             return (
                 <div className="min-h-screen flex items-center justify-center p-4">
-                    <div className="bg-white p-6 md:p-8 rounded-2xl shadow-xl max-w-lg w-full">
+                    <div className="bg-white p-6 md:p-8 rounded-2xl shadow-xl max-w-xl w-full">
                         <TopBar title="Thêm từ mới" onBack={onBack} />
 
                         <form onSubmit={submit} className="space-y-4">
                             <div>
-                                <label className="block text-sm font-semibold text-gray-600 mb-1">Từ tiếng Anh <span className="text-gray-400 font-normal">(để trống để tự động dịch từ ô Tiếng Việt)</span></label>
-                                <input value={en} onChange={e => { setEn(e.target.value); setAutoFilledEn(false); }} placeholder="VD: umbrella — hoặc để trống"
+                                <label className="block text-sm font-semibold text-gray-600 mb-1">Từ tiếng Anh</label>
+                                <input value={en} onChange={e => { setEn(e.target.value); setAutoFilledEn(false); }} placeholder="VD: umbrella — hoặc để trống để tự dịch"
                                     className="w-full p-3 border-2 border-gray-200 rounded-xl outline-none focus:border-indigo-500 transition-colors" />
-                                {autoFilledEn && <p className="mt-1 text-xs text-emerald-600"><i className="fas fa-wand-magic-sparkles mr-1"></i>Đã tự động dịch từ tiếng Việt, bạn có thể sửa lại nếu cần.</p>}
+                                {autoFilledEn && <p className="mt-1 text-xs text-emerald-600"><i className="fas fa-wand-magic-sparkles mr-1"></i>Đã tự động dịch</p>}
                             </div>
                             <div>
-                                <label className="block text-sm font-semibold text-gray-600 mb-1">Nghĩa tiếng Việt <span className="text-gray-400 font-normal">(để trống để tự động dịch)</span></label>
-                                <input value={vi} onChange={e => setVi(e.target.value)} onBlur={handleViBlur} placeholder="VD: Cái ô / cây dù — hoặc để trống"
+                                <label className="block text-sm font-semibold text-gray-600 mb-1">Nghĩa tiếng Việt</label>
+                                <input value={vi} onChange={e => setVi(e.target.value)} onBlur={handleViBlur} placeholder="VD: Cái ô / cây dù — hoặc để trống để tự dịch"
                                     className="w-full p-3 border-2 border-gray-200 rounded-xl outline-none focus:border-indigo-500 transition-colors" />
-                                <p className="mt-1 text-xs text-gray-400">Nhập tiếng Việt và để trống ô Tiếng Anh ở trên — hệ thống sẽ tự dịch sang tiếng Anh và tạo câu hỏi theo đúng cấu trúc.</p>
                             </div>
                             <div>
                                 <label className="block text-sm font-semibold text-gray-600 mb-1">Gợi ý (không bắt buộc)</label>
@@ -584,7 +647,7 @@
         function ManageWords({ words, onBack, onDelete }) {
             return (
                 <div className="min-h-screen flex items-center justify-center p-4">
-                    <div className="bg-white p-6 md:p-8 rounded-2xl shadow-xl max-w-lg w-full">
+                    <div className="bg-white p-6 md:p-8 rounded-2xl shadow-xl max-w-2xl w-full">
                         <TopBar title={`Từ đã thêm (${words.length})`} onBack={onBack} />
                         {words.length === 0 ? (
                             <div className="text-center py-10 text-gray-400">
@@ -662,7 +725,7 @@
 
             return (
                 <div className="min-h-screen flex items-center justify-center p-4">
-                    <div className="bg-white p-6 md:p-8 rounded-2xl shadow-xl max-w-2xl w-full">
+                    <div className="bg-white p-6 md:p-8 rounded-2xl shadow-xl max-w-3xl w-full">
                         <TopBar title="Tạo bộ đề riêng" onBack={onBack} />
 
                         <div className="space-y-4 mb-6">
@@ -698,7 +761,7 @@
                                     <i className="fas fa-plus mr-1"></i>Thêm dòng
                                 </button>
                             </div>
-                            <p className="text-xs text-gray-400 mb-2">Chỉ cần nhập 1 trong 2 ô (Anh hoặc Việt) — hệ thống sẽ tự động dịch chiều còn lại khi lưu.</p>
+
                             <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
                                 {rows.map((row, idx) => (
                                     <div key={idx} className="grid grid-cols-[1fr_1fr_auto] gap-2 items-center bg-gray-50 p-2 rounded-xl">
@@ -730,7 +793,7 @@
         function MyQuizzes({ quizzes, onBack, onPlay, onDelete }) {
             return (
                 <div className="min-h-screen flex items-center justify-center p-4">
-                    <div className="bg-white p-6 md:p-8 rounded-2xl shadow-xl max-w-lg w-full">
+                    <div className="bg-white p-6 md:p-8 rounded-2xl shadow-xl max-w-2xl w-full">
                         <TopBar title={`Bộ đề của tôi (${quizzes.length})`} onBack={onBack} />
                         {quizzes.length === 0 ? (
                             <div className="text-center py-10 text-gray-400">
@@ -766,6 +829,98 @@
             );
         }
 
+        // ---------- Word List Screen (toàn bộ từ vựng hiện có) ----------
+        function WordList({ words, onBack }) {
+            const [query, setQuery] = useState("");
+            const filtered = query.trim()
+                ? words.filter(w => w.en.toLowerCase().includes(query.toLowerCase()) || w.vi.toLowerCase().includes(query.toLowerCase()))
+                : words;
+            return (
+                <div className="min-h-screen flex items-center justify-center p-4">
+                    <div className="bg-white p-6 md:p-8 rounded-2xl shadow-xl max-w-2xl w-full">
+                        <TopBar title={`Từ vựng hiện có (${words.length})`} onBack={onBack} />
+                        <input
+                            value={query} onChange={e => setQuery(e.target.value)}
+                            placeholder="Tìm từ..."
+                            className="w-full p-3 mb-4 border-2 border-gray-200 rounded-xl outline-none focus:border-indigo-500 transition-colors text-base md:text-lg"
+                        />
+                        {filtered.length === 0 ? (
+                            <div className="text-center py-10 text-gray-400">
+                                <i className="fas fa-magnifying-glass text-4xl mb-3"></i>
+                                <p>Không tìm thấy từ nào.</p>
+                            </div>
+                        ) : (
+                            <div className="space-y-2 max-h-[28rem] overflow-y-auto pr-1">
+                                {filtered.map((w, idx) => (
+                                    <div key={idx} className="flex items-center justify-between bg-gray-50 p-3 rounded-xl gap-2">
+                                        <div className="min-w-0 flex-1">
+                                            <p className="font-bold text-gray-800 text-lg truncate">{w.en}</p>
+                                            <p className="text-gray-500 truncate">{w.vi}</p>
+                                        </div>
+                                        <SpeakerButton word={w.en} size="w-10 h-10" />
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        // ---------- Quiz History Screen (lịch sử làm bài) ----------
+        function modeInfo(mode) {
+            return mode === 'type' ? { label: 'Điền từ', icon: 'fa-keyboard', color: 'text-indigo-600' }
+                 : mode === 'choice' ? { label: 'Chọn nghĩa đúng', icon: 'fa-list-check', color: 'text-purple-600' }
+                 : { label: 'Nhìn hình đoán từ', icon: 'fa-image', color: 'text-teal-600' };
+        }
+        function formatHistoryDate(iso) {
+            try {
+                const d = new Date(iso);
+                return d.toLocaleString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+            } catch (e) { return ""; }
+        }
+        function QuizHistory({ items, onBack, onClear }) {
+            return (
+                <div className="min-h-screen flex items-center justify-center p-4">
+                    <div className="bg-white p-6 md:p-8 rounded-2xl shadow-xl max-w-2xl w-full">
+                        <TopBar title={`Lịch sử làm bài (${items.length})`} onBack={onBack}
+                            right={items.length > 0 && (
+                                <button onClick={onClear} title="Xóa lịch sử" className="w-10 h-10 rounded-full bg-white shadow flex items-center justify-center text-red-400 hover:bg-red-50 transition-colors">
+                                    <i className="fas fa-trash"></i>
+                                </button>
+                            )} />
+                        {items.length === 0 ? (
+                            <div className="text-center py-10 text-gray-400">
+                                <i className="fas fa-clock-rotate-left text-4xl mb-3"></i>
+                                <p>Bạn chưa làm bài kiểm tra nào cả.</p>
+                            </div>
+                        ) : (
+                            <div className="space-y-2 max-h-[28rem] overflow-y-auto pr-1">
+                                {items.map((h, idx) => {
+                                    const info = modeInfo(h.mode);
+                                    const pct = h.total ? Math.round((h.score / h.total) * 100) : 0;
+                                    return (
+                                        <div key={idx} className="flex items-center justify-between bg-gray-50 p-4 rounded-xl gap-3">
+                                            <div className="min-w-0 flex-1">
+                                                <p className="font-bold text-gray-800">
+                                                    <i className={`fas ${info.icon} ${info.color} mr-2`}></i>
+                                                    {h.quizName || info.label}
+                                                </p>
+                                                <p className="text-sm text-gray-400 mt-0.5">{formatHistoryDate(h.date)}</p>
+                                            </div>
+                                            <div className={`text-lg font-extrabold flex-shrink-0 ${pct >= 80 ? 'text-green-600' : pct >= 50 ? 'text-amber-600' : 'text-red-500'}`}>
+                                                {h.score}/{h.total}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
         // ---------- Quiz: Type mode ----------
         function TypeQuiz({ list, onFinish, onExit }) {
             const [idx, setIdx] = useState(0);
@@ -776,80 +931,83 @@
 
             const current = list[idx];
             const progress = ((idx + 1) / list.length) * 100;
+            const isLast = idx === list.length - 1;
+
+            const goNext = () => {
+                if (!isLast) {
+                    setIdx(i => i + 1);
+                    setInput("");
+                    setFeedback(null);
+                } else {
+                    onFinish(score, history);
+                }
+            };
 
             const submit = (e) => {
                 e.preventDefault();
-                if (!input.trim() || feedback) return;
+                if (feedback) { goNext(); return; }
+                if (!input.trim()) return;
                 const isCorrect = normalize(input) === normalize(current.en);
-                if (isCorrect) setScore(s => s + 1);
+                if (isCorrect) { setScore(s => s + 1); playCorrectSound(); } else { playWrongSound(); }
                 setFeedback(isCorrect ? 'correct' : 'wrong');
-                const newHistory = [...history, { ...current, userInput: input, isCorrect, mode: 'type' }];
-                setHistory(newHistory);
-
-                setTimeout(() => {
-                    if (idx < list.length - 1) {
-                        setIdx(i => i + 1);
-                        setInput("");
-                        setFeedback(null);
-                    } else {
-                        onFinish(isCorrect ? score + 1 : score, newHistory);
-                    }
-                }, 1500);
+                setHistory(prev => [...prev, { ...current, userInput: input, isCorrect, mode: 'type' }]);
             };
 
             return (
                 <div className="min-h-screen flex items-center justify-center p-4">
-                    <div className="bg-white p-6 md:p-10 rounded-2xl shadow-xl max-w-lg w-full card-pop">
+                    <div className="bg-white p-6 md:p-10 rounded-2xl shadow-xl max-w-4xl w-full card-pop">
                         <TopBar title="Gõ từ tiếng Anh" onBack={onExit} />
                         <div className="w-full bg-gray-200 rounded-full h-2 mb-6">
                             <div className="bg-indigo-600 h-2 rounded-full transition-all duration-500" style={{ width: `${progress}%` }}></div>
                         </div>
                         <div className="flex justify-between items-center mb-6">
-                            <span className="text-sm font-medium text-gray-500 uppercase tracking-wider">Câu {idx + 1} / {list.length}</span>
-                            <span className="text-sm font-bold text-indigo-600">Đúng: {score}</span>
+                            <span className="text-sm md:text-base font-medium text-gray-500 uppercase tracking-wider">Câu {idx + 1} / {list.length}</span>
+                            <span className="text-sm md:text-base font-bold text-indigo-600">Đúng: {score}</span>
                         </div>
 
-                        <div className="mb-8">
-                            <h3 className="text-sm text-gray-500 mb-2">Dịch sang tiếng Anh:</h3>
-                            <p className="text-2xl font-bold text-gray-800 leading-tight">{current.vi}</p>
-                        </div>
+                        <div className="md:grid md:grid-cols-2 md:gap-10 md:items-center">
+                            <div className="mb-8 md:mb-0">
+                                <h3 className="text-sm md:text-base text-gray-500 mb-2">Dịch sang tiếng Anh:</h3>
+                                <p className="text-3xl md:text-5xl font-bold text-gray-800 leading-tight">{current.vi}</p>
+                            </div>
 
-                        <form onSubmit={submit} className="space-y-6">
                             <div>
-                                <input
-                                    type="text"
-                                    value={input}
-                                    onChange={(e) => setInput(e.target.value)}
-                                    disabled={feedback !== null}
-                                    autoFocus
-                                    placeholder="Nhập câu trả lời..."
-                                    className={`w-full p-4 border-2 rounded-xl text-lg outline-none transition-all ${
-                                        feedback === 'correct' ? 'border-green-500 bg-green-50' :
-                                        feedback === 'wrong' ? 'border-red-500 bg-red-50 shake' :
-                                        'border-gray-200 focus:border-indigo-500'
-                                    }`}
-                                />
-                                <p className="mt-2 text-sm text-gray-400 italic">Gợi ý: {current.hint || generateHint(current.en)}</p>
-                            </div>
+                                <form onSubmit={submit} className="space-y-6">
+                                    <div>
+                                        <input
+                                            type="text"
+                                            value={input}
+                                            onChange={(e) => setInput(e.target.value)}
+                                            disabled={feedback !== null}
+                                            autoFocus
+                                            placeholder="Nhập câu trả lời..."
+                                            className={`w-full p-4 md:p-5 border-2 rounded-xl text-lg md:text-2xl outline-none transition-all ${
+                                                feedback === 'correct' ? 'border-green-500 bg-green-50' :
+                                                feedback === 'wrong' ? 'border-red-500 bg-red-50 shake' :
+                                                'border-gray-200 focus:border-indigo-500'
+                                            }`}
+                                        />
+                                        <p className="mt-2 text-sm md:text-base text-gray-400 italic">Gợi ý: {current.hint || generateHint(current.en)}</p>
+                                    </div>
 
-                            <button type="submit" disabled={feedback !== null || !input.trim()}
-                                className={`w-full py-4 rounded-xl font-bold text-white text-lg shadow-lg transition-all ${
-                                    feedback === 'correct' ? 'bg-green-500' :
-                                    feedback === 'wrong' ? 'bg-red-500' :
-                                    'bg-indigo-600 hover:bg-indigo-700 active:scale-95'
-                                }`}>
-                                {feedback === 'correct' ? <span><i className="fas fa-check mr-2"></i>Chính xác!</span> :
-                                 feedback === 'wrong' ? <span><i className="fas fa-times mr-2"></i>Sai rồi! Đáp án: {current.en}</span> :
-                                 "Kiểm tra"}
-                            </button>
-                        </form>
-                        {feedback !== null && (
-                            <div className="mt-4 p-3 bg-gray-50 rounded-xl">
-                                <p className="text-xs text-gray-500 mb-2">Luyện phát âm từ này:</p>
-                                <PronounceWidget word={current.en} compact />
+                                    <button type="submit" disabled={feedback === null && !input.trim()}
+                                        className={`w-full py-4 md:py-5 rounded-xl font-bold text-white text-lg md:text-xl shadow-lg transition-all active:scale-95 ${
+                                            feedback === 'correct' ? 'bg-green-500 hover:bg-green-600' :
+                                            feedback === 'wrong' ? 'bg-red-500 hover:bg-red-600' :
+                                            'bg-indigo-600 hover:bg-indigo-700'
+                                        }`}>
+                                        {feedback === 'correct' ? <span><i className="fas fa-check mr-2"></i>Chính xác! · {isLast ? 'Xem kết quả' : 'Tiếp tục'}</span> :
+                                         feedback === 'wrong' ? <span><i className="fas fa-times mr-2"></i>Đáp án: {current.en} · {isLast ? 'Xem kết quả' : 'Tiếp tục'}</span> :
+                                         "Kiểm tra"}
+                                    </button>
+                                </form>
+                                {feedback !== null && (
+                                    <div className="mt-4 p-3 bg-gray-50 rounded-xl">
+                                        <PronounceWidget word={current.en} compact />
+                                    </div>
+                                )}
                             </div>
-                        )}
-                        <p className="mt-6 text-center text-xs text-gray-400">Nhấn <span className="font-bold">Enter</span> để kiểm tra nhanh</p>
+                        </div>
                     </div>
                 </div>
             );
@@ -864,6 +1022,7 @@
 
             const current = list[idx];
             const progress = ((idx + 1) / list.length) * 100;
+            const isLast = idx === list.length - 1;
 
             const options = useMemo(() => {
                 const others = shuffle(pool.filter(w => w.vi !== current.vi)).slice(0, 3).map(w => w.vi);
@@ -874,55 +1033,67 @@
                 if (selected) return;
                 const isCorrect = opt === current.vi;
                 setSelected(opt);
-                if (isCorrect) setScore(s => s + 1);
-                const newHistory = [...history, { ...current, userInput: opt, isCorrect, mode: 'choice' }];
-                setHistory(newHistory);
+                if (isCorrect) { setScore(s => s + 1); playCorrectSound(); } else { playWrongSound(); }
+                setHistory(prev => [...prev, { ...current, userInput: opt, isCorrect, mode: 'choice' }]);
+            };
 
-                setTimeout(() => {
-                    if (idx < list.length - 1) {
-                        setIdx(i => i + 1);
-                        setSelected(null);
-                    } else {
-                        onFinish(isCorrect ? score + 1 : score, newHistory);
-                    }
-                }, 1200);
+            const goNext = () => {
+                if (!isLast) {
+                    setIdx(i => i + 1);
+                    setSelected(null);
+                } else {
+                    onFinish(score, history);
+                }
             };
 
             return (
                 <div className="min-h-screen flex items-center justify-center p-4">
-                    <div className="bg-white p-6 md:p-10 rounded-2xl shadow-xl max-w-lg w-full card-pop">
+                    <div className="bg-white p-6 md:p-10 rounded-2xl shadow-xl max-w-4xl w-full card-pop">
                         <TopBar title="Chọn nghĩa đúng" onBack={onExit} />
                         <div className="w-full bg-gray-200 rounded-full h-2 mb-6">
                             <div className="bg-purple-600 h-2 rounded-full transition-all duration-500" style={{ width: `${progress}%` }}></div>
                         </div>
                         <div className="flex justify-between items-center mb-6">
-                            <span className="text-sm font-medium text-gray-500 uppercase tracking-wider">Câu {idx + 1} / {list.length}</span>
-                            <span className="text-sm font-bold text-purple-600">Đúng: {score}</span>
+                            <span className="text-sm md:text-base font-medium text-gray-500 uppercase tracking-wider">Câu {idx + 1} / {list.length}</span>
+                            <span className="text-sm md:text-base font-bold text-purple-600">Đúng: {score}</span>
                         </div>
 
-                        <div className="mb-8 text-center">
-                            <h3 className="text-sm text-gray-500 mb-2">Từ này có nghĩa là gì?</h3>
-                            <p className="text-3xl font-extrabold text-gray-800 mb-3">{current.en}</p>
-                            <div className="flex justify-center">
-                                <PronounceWidget word={current.en} compact />
+                        <div className="md:grid md:grid-cols-2 md:gap-10 md:items-center">
+                            <div className="mb-8 md:mb-0 text-center">
+                                <h3 className="text-sm md:text-base text-gray-500 mb-2">Từ này có nghĩa là gì?</h3>
+                                <p className="text-4xl md:text-6xl font-extrabold text-gray-800 mb-4">{current.en}</p>
+                                <div className="flex justify-center">
+                                    <PronounceWidget word={current.en} compact />
+                                </div>
                             </div>
-                        </div>
 
-                        <div className="grid gap-3">
-                            {options.map((opt, i) => {
-                                let style = 'border-gray-200 hover:border-purple-300 bg-white';
-                                if (selected) {
-                                    if (opt === current.vi) style = 'border-green-500 bg-green-50 text-green-700';
-                                    else if (opt === selected) style = 'border-red-500 bg-red-50 text-red-700 shake';
-                                    else style = 'border-gray-100 bg-gray-50 text-gray-400';
-                                }
-                                return (
-                                    <button key={i} onClick={() => pick(opt)} disabled={selected !== null}
-                                        className={`p-4 rounded-xl border-2 text-left font-semibold transition-all ${style}`}>
-                                        {opt}
+                            <div>
+                                <div className="grid sm:grid-cols-2 gap-3">
+                                    {options.map((opt, i) => {
+                                        let style = 'border-gray-200 hover:border-purple-300 bg-white';
+                                        if (selected) {
+                                            if (opt === current.vi) style = 'border-green-500 bg-green-50 text-green-700';
+                                            else if (opt === selected) style = 'border-red-500 bg-red-50 text-red-700 shake';
+                                            else style = 'border-gray-100 bg-gray-50 text-gray-400';
+                                        }
+                                        return (
+                                            <button key={i} onClick={() => pick(opt)} disabled={selected !== null}
+                                                className={`p-4 md:p-5 rounded-xl border-2 text-left font-semibold text-base md:text-lg transition-all ${style}`}>
+                                                {opt}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                                {selected && (
+                                    <button onClick={goNext}
+                                        className={`w-full mt-5 py-4 md:py-5 rounded-xl font-bold text-white text-lg md:text-xl shadow-lg transition-all active:scale-95 ${
+                                            selected === current.vi ? 'bg-green-500 hover:bg-green-600' : 'bg-purple-600 hover:bg-purple-700'
+                                        }`}>
+                                        {isLast ? <span>Xem kết quả<i className="fas fa-flag-checkered ml-2"></i></span>
+                                                : <span>Câu tiếp theo<i className="fas fa-arrow-right ml-2"></i></span>}
                                     </button>
-                                );
-                            })}
+                                )}
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -942,6 +1113,7 @@
 
             const current = list[idx];
             const progress = ((idx + 1) / list.length) * 100;
+            const isLast = idx === list.length - 1;
             const imgSrc = candidates[candidateIdx] || "";
 
             useEffect(() => {
@@ -955,94 +1127,96 @@
                 return () => { cancelled = true; };
             }, [idx]);
 
+            const goNext = () => {
+                if (!isLast) {
+                    setIdx(i => i + 1);
+                    setInput("");
+                    setFeedback(null);
+                } else {
+                    onFinish(score, history);
+                }
+            };
+
             const submit = (e) => {
                 e.preventDefault();
-                if (!input.trim() || feedback) return;
+                if (feedback) { goNext(); return; }
+                if (!input.trim()) return;
                 const isCorrect = normalize(input) === normalize(current.en);
-                if (isCorrect) setScore(s => s + 1);
+                if (isCorrect) { setScore(s => s + 1); playCorrectSound(); } else { playWrongSound(); }
                 setFeedback(isCorrect ? 'correct' : 'wrong');
-                const newHistory = [...history, { ...current, userInput: input, isCorrect, mode: 'image' }];
-                setHistory(newHistory);
-
-                setTimeout(() => {
-                    if (idx < list.length - 1) {
-                        setIdx(i => i + 1);
-                        setInput("");
-                        setFeedback(null);
-                    } else {
-                        onFinish(isCorrect ? score + 1 : score, newHistory);
-                    }
-                }, 1500);
+                setHistory(prev => [...prev, { ...current, userInput: input, isCorrect, mode: 'image' }]);
             };
 
             return (
                 <div className="min-h-screen flex items-center justify-center p-4">
-                    <div className="bg-white p-6 md:p-10 rounded-2xl shadow-xl max-w-lg w-full card-pop">
+                    <div className="bg-white p-6 md:p-10 rounded-2xl shadow-xl max-w-4xl w-full card-pop">
                         <TopBar title="Nhìn hình đoán từ" onBack={onExit} />
                         <div className="w-full bg-gray-200 rounded-full h-2 mb-6">
                             <div className="bg-teal-600 h-2 rounded-full transition-all duration-500" style={{ width: `${progress}%` }}></div>
                         </div>
                         <div className="flex justify-between items-center mb-6">
-                            <span className="text-sm font-medium text-gray-500 uppercase tracking-wider">Câu {idx + 1} / {list.length}</span>
-                            <span className="text-sm font-bold text-teal-600">Đúng: {score}</span>
+                            <span className="text-sm md:text-base font-medium text-gray-500 uppercase tracking-wider">Câu {idx + 1} / {list.length}</span>
+                            <span className="text-sm md:text-base font-bold text-teal-600">Đúng: {score}</span>
                         </div>
 
-                        <div className="mb-6 relative rounded-xl overflow-hidden bg-gray-100 aspect-[4/3] flex items-center justify-center">
-                            {imgLoading && <div className="absolute inset-0 flex items-center justify-center text-gray-300"><i className="fas fa-spinner fa-spin text-3xl"></i></div>}
-                            {imgSrc && (
-                                <img
-                                    key={imgSrc}
-                                    src={imgSrc}
-                                    alt="Đoán từ tiếng Anh"
-                                    onLoad={() => setImgLoading(false)}
-                                    onError={() => {
-                                        setCandidateIdx(i => {
-                                            const next = i + 1;
-                                            if (next >= candidates.length) { setImgLoading(false); return i; }
-                                            return next;
-                                        });
-                                    }}
-                                    className={`w-full h-full object-cover transition-opacity ${imgLoading ? 'opacity-0' : 'opacity-100'}`}
-                                />
-                            )}
-                        </div>
+                        <div className="md:grid md:grid-cols-2 md:gap-10 md:items-center">
+                            <div className="mb-6 md:mb-0 relative rounded-xl overflow-hidden bg-gray-100 aspect-[4/3] flex items-center justify-center">
+                                {imgLoading && <div className="absolute inset-0 flex items-center justify-center text-gray-300"><i className="fas fa-spinner fa-spin text-3xl"></i></div>}
+                                {imgSrc && (
+                                    <img
+                                        key={imgSrc}
+                                        src={imgSrc}
+                                        alt="Đoán từ tiếng Anh"
+                                        onLoad={() => setImgLoading(false)}
+                                        onError={() => {
+                                            setCandidateIdx(i => {
+                                                const next = i + 1;
+                                                if (next >= candidates.length) { setImgLoading(false); return i; }
+                                                return next;
+                                            });
+                                        }}
+                                        className={`w-full h-full object-cover transition-opacity ${imgLoading ? 'opacity-0' : 'opacity-100'}`}
+                                    />
+                                )}
+                            </div>
 
-                        <form onSubmit={submit} className="space-y-6">
                             <div>
-                                <input
-                                    type="text"
-                                    value={input}
-                                    onChange={(e) => setInput(e.target.value)}
-                                    disabled={feedback !== null}
-                                    autoFocus
-                                    placeholder="Đây là từ gì trong tiếng Anh?"
-                                    className={`w-full p-4 border-2 rounded-xl text-lg outline-none transition-all ${
-                                        feedback === 'correct' ? 'border-green-500 bg-green-50' :
-                                        feedback === 'wrong' ? 'border-red-500 bg-red-50 shake' :
-                                        'border-gray-200 focus:border-teal-500'
-                                    }`}
-                                />
-                                <p className="mt-2 text-sm text-gray-400 italic">Gợi ý: {current.hint || generateHint(current.en)}</p>
-                            </div>
+                                <form onSubmit={submit} className="space-y-6">
+                                    <div>
+                                        <input
+                                            type="text"
+                                            value={input}
+                                            onChange={(e) => setInput(e.target.value)}
+                                            disabled={feedback !== null}
+                                            autoFocus
+                                            placeholder="Đây là từ gì trong tiếng Anh?"
+                                            className={`w-full p-4 md:p-5 border-2 rounded-xl text-lg md:text-2xl outline-none transition-all ${
+                                                feedback === 'correct' ? 'border-green-500 bg-green-50' :
+                                                feedback === 'wrong' ? 'border-red-500 bg-red-50 shake' :
+                                                'border-gray-200 focus:border-teal-500'
+                                            }`}
+                                        />
+                                        <p className="mt-2 text-sm md:text-base text-gray-400 italic">Gợi ý: {current.hint || generateHint(current.en)}</p>
+                                    </div>
 
-                            <button type="submit" disabled={feedback !== null || !input.trim()}
-                                className={`w-full py-4 rounded-xl font-bold text-white text-lg shadow-lg transition-all ${
-                                    feedback === 'correct' ? 'bg-green-500' :
-                                    feedback === 'wrong' ? 'bg-red-500' :
-                                    'bg-teal-600 hover:bg-teal-700 active:scale-95'
-                                }`}>
-                                {feedback === 'correct' ? <span><i className="fas fa-check mr-2"></i>Chính xác!</span> :
-                                 feedback === 'wrong' ? <span><i className="fas fa-times mr-2"></i>Sai rồi! Đáp án: {current.en}</span> :
-                                 "Kiểm tra"}
-                            </button>
-                        </form>
-                        {feedback !== null && (
-                            <div className="mt-4 p-3 bg-gray-50 rounded-xl">
-                                <p className="text-xs text-gray-500 mb-2">Luyện phát âm từ này:</p>
-                                <PronounceWidget word={current.en} compact />
+                                    <button type="submit" disabled={feedback === null && !input.trim()}
+                                        className={`w-full py-4 md:py-5 rounded-xl font-bold text-white text-lg md:text-xl shadow-lg transition-all active:scale-95 ${
+                                            feedback === 'correct' ? 'bg-green-500 hover:bg-green-600' :
+                                            feedback === 'wrong' ? 'bg-red-500 hover:bg-red-600' :
+                                            'bg-teal-600 hover:bg-teal-700'
+                                        }`}>
+                                        {feedback === 'correct' ? <span><i className="fas fa-check mr-2"></i>Chính xác! · {isLast ? 'Xem kết quả' : 'Tiếp tục'}</span> :
+                                         feedback === 'wrong' ? <span><i className="fas fa-times mr-2"></i>Đáp án: {current.en} · {isLast ? 'Xem kết quả' : 'Tiếp tục'}</span> :
+                                         "Kiểm tra"}
+                                    </button>
+                                </form>
+                                {feedback !== null && (
+                                    <div className="mt-4 p-3 bg-gray-50 rounded-xl">
+                                        <PronounceWidget word={current.en} compact />
+                                    </div>
+                                )}
                             </div>
-                        )}
-                        <p className="mt-6 text-center text-xs text-gray-400">Nhấn <span className="font-bold">Enter</span> để kiểm tra nhanh</p>
+                        </div>
                     </div>
                 </div>
             );
@@ -1052,7 +1226,7 @@
         function Result({ score, total, history, onRestart, onHome }) {
             return (
                 <div className="min-h-screen flex items-center justify-center p-4">
-                    <div className="bg-white p-8 rounded-2xl shadow-xl max-w-2xl w-full text-center card-pop">
+                    <div className="bg-white p-8 rounded-2xl shadow-xl max-w-3xl w-full text-center card-pop">
                         <h2 className="text-3xl font-bold mb-2 text-indigo-600">Kết quả bài kiểm tra</h2>
                         <p className="text-gray-500 mb-4">{score === total ? "Xuất sắc! Bạn đã trả lời đúng hết! 🎉" : "Cố lên, luyện tập thêm nhé!"}</p>
                         <div className="text-6xl font-bold mb-6 text-gray-800">{score} / {total}</div>
@@ -1085,6 +1259,7 @@
         function App() {
             const [customWords, setCustomWords] = useState(() => loadCustomWords());
             const [customQuizzes, setCustomQuizzes] = useState(() => loadCustomQuizzes());
+            const [history, setHistory] = useState(() => loadHistory());
             const [screen, setScreen] = useState('home');
             const [mode, setMode] = useState('type');
             const [quizList, setQuizList] = useState([]);
@@ -1096,6 +1271,7 @@
 
             useEffect(() => { saveCustomWords(customWords); }, [customWords]);
             useEffect(() => { saveCustomQuizzes(customQuizzes); }, [customQuizzes]);
+            useEffect(() => { saveHistory(history); }, [history]);
 
             const startQuiz = (chosenMode) => {
                 setActiveQuiz(null);
@@ -1118,8 +1294,16 @@
                 else startQuiz(mode);
             };
 
-            const finishQuiz = (score, history) => {
-                setResult({ score, total: quizList.length, history });
+            const finishQuiz = (score, historyItems) => {
+                setResult({ score, total: quizList.length, history: historyItems });
+                const record = {
+                    date: new Date().toISOString(),
+                    mode,
+                    score,
+                    total: quizList.length,
+                    quizName: activeQuiz ? activeQuiz.name : null,
+                };
+                setHistory(prev => [record, ...prev].slice(0, MAX_HISTORY));
                 setScreen('result');
             };
 
@@ -1128,6 +1312,7 @@
 
             const addQuiz = (quiz) => { setCustomQuizzes(prev => [...prev, quiz]); setScreen('my-quizzes'); };
             const deleteQuiz = (id) => setCustomQuizzes(prev => prev.filter(q => q.id !== id));
+            const clearHistory = () => setHistory([]);
 
             // Xin quyền Micro đúng 1 lần ngay khi vào web; sau khi được cấp, trình duyệt tự nhớ vĩnh viễn
             // cho tên miền này nên các lần bấm micro sau đó sẽ không hỏi lại nữa.
@@ -1150,6 +1335,12 @@
                 case 'pronounce':
                     content = <PronunciationPractice words={allWords} onBack={() => setScreen('home')} />;
                     break;
+                case 'word-list':
+                    content = <WordList words={allWords} onBack={() => setScreen('home')} />;
+                    break;
+                case 'history':
+                    content = <QuizHistory items={history} onBack={() => setScreen('home')} onClear={clearHistory} />;
+                    break;
                 case 'quiz':
                     content = mode === 'type'
                         ? <TypeQuiz list={quizList} onFinish={finishQuiz} onExit={() => setScreen('home')} />
@@ -1161,10 +1352,11 @@
                     content = <Result {...result} onRestart={restartQuiz} onHome={() => setScreen('home')} />;
                     break;
                 default:
-                    content = <Home wordCount={allWords.length} quizCount={customQuizzes.length} onStart={startQuiz}
+                    content = <Home wordCount={allWords.length} quizCount={customQuizzes.length} historyCount={history.length} onStart={startQuiz}
                         onAdd={() => setScreen('add')} onManage={() => setScreen('manage')}
                         onCreateQuiz={() => setScreen('create-quiz')} onMyQuizzes={() => setScreen('my-quizzes')}
-                        onPronounce={() => setScreen('pronounce')} />;
+                        onPronounce={() => setScreen('pronounce')} onWordList={() => setScreen('word-list')}
+                        onHistory={() => setScreen('history')} />;
             }
 
             return (
