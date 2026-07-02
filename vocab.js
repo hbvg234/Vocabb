@@ -26,16 +26,16 @@
         const { useState, useEffect, useMemo } = React;
 
         const defaultWords = [
-            { vi: "Trung tâm thể thao", en: "sport centre" },
-            { vi: "Bánh mì kẹp", en: "sandwich" },
-            { vi: "Màu sắc", en: "color" },
-            { vi: "Đồ ăn / thức ăn", en: "food" },
-            { vi: "Cá heo", en: "dolphin" },
-            { vi: "Động vật", en: "animal" },
+            { vi: "Trung tâm thể thao", en: "Sport Centre" },
+            { vi: "Bánh mì kẹp", en: "Sandwich" },
+            { vi: "Màu sắc", en: "Color" },
+            { vi: "Đồ ăn / thức ăn", en: "Food" },
+            { vi: "Cá heo", en: "Dolphin" },
+            { vi: "Động vật", en: "Animal" },
             { vi: "Màu sắc yêu thích của bạn là gì?", en: "What is your favourite color?" },
-            { vi: "Voi.", en: "Elephant" },
-            { vi: "Hổ.", en: "Tiger" },
-            { vi: "Sư Tử.", en: "Lion" }
+            { vi: "Voi", en: "Elephant" },
+            { vi: "Hổ", en: "Tiger" },
+            { vi: "Sư Tử", en: "Lion" }
         ];
 
         const STORAGE_KEY = "vocab_app_custom_words_v1";
