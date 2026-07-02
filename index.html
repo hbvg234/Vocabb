@@ -193,10 +193,12 @@
             return null;
         }
 
-        // Dịch tiếng Anh sang tiếng Việt tự động (dùng khi người dùng để trống ô Tiếng Việt)
-        async function autoTranslate(enWord) {
+        // Dịch tự động 2 chiều: mặc định Anh -> Việt (dùng khi để trống ô Tiếng Việt).
+        // Truyền direction = 'vi-en' để dịch ngược Việt -> Anh (khi để trống ô Tiếng Anh).
+        async function autoTranslate(word, direction = 'en-vi') {
+            const langpair = direction === 'vi-en' ? 'vi|en' : 'en|vi';
             try {
-                const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(enWord)}&langpair=en|vi`);
+                const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(word)}&langpair=${langpair}`);
                 const data = await res.json();
                 const text = data && data.responseData && data.responseData.translatedText;
                 if (text && !/mymemory|invalid|query length/i.test(text)) {
@@ -502,19 +504,42 @@
             const [hint, setHint] = useState("");
             const [justAdded, setJustAdded] = useState(false);
             const [translating, setTranslating] = useState(false);
+            const [autoFilledEn, setAutoFilledEn] = useState(false);
+
+            // Khi rời khỏi ô Tiếng Việt: nếu ô Tiếng Anh đang trống, tự động dịch Việt -> Anh
+            const handleViBlur = async () => {
+                if (en.trim() || !vi.trim() || translating) return;
+                setTranslating(true);
+                const translated = await autoTranslate(vi.trim(), 'vi-en');
+                setTranslating(false);
+                if (translated) { setEn(translated); setAutoFilledEn(true); }
+            };
 
             const submit = async (e) => {
                 e.preventDefault();
-                if (!en.trim() || translating) return;
+                if ((!en.trim() && !vi.trim()) || translating) return;
+
+                let finalEn = en.trim();
                 let finalVi = vi.trim();
-                if (!finalVi) {
+
+                // Ô Tiếng Anh trống -> tự động chuyển đổi từ Tiếng Việt sang Tiếng Anh
+                if (!finalEn && finalVi) {
                     setTranslating(true);
-                    finalVi = await autoTranslate(en.trim());
+                    finalEn = await autoTranslate(finalVi, 'vi-en');
                     setTranslating(false);
-                    if (!finalVi) { finalVi = en.trim(); }
+                    if (!finalEn) { finalEn = finalVi; }
                 }
-                onSave({ vi: finalVi, en: en.trim(), hint: (hint.trim() || generateHint(en.trim())) });
-                setVi(""); setEn(""); setHint("");
+                // Ô Tiếng Việt trống -> tự động dịch từ Tiếng Anh sang Tiếng Việt (như cũ)
+                if (!finalVi && finalEn) {
+                    setTranslating(true);
+                    finalVi = await autoTranslate(finalEn, 'en-vi');
+                    setTranslating(false);
+                    if (!finalVi) { finalVi = finalEn; }
+                }
+
+                // Tạo câu hỏi theo đúng cấu trúc hiện có (gợi ý dạng "u___" dựa trên từ tiếng Anh cuối cùng)
+                onSave({ vi: finalVi, en: finalEn, hint: (hint.trim() || generateHint(finalEn)) });
+                setVi(""); setEn(""); setHint(""); setAutoFilledEn(false);
                 setJustAdded(true);
                 setTimeout(() => setJustAdded(false), 1500);
             };
@@ -526,14 +551,16 @@
 
                         <form onSubmit={submit} className="space-y-4">
                             <div>
-                                <label className="block text-sm font-semibold text-gray-600 mb-1">Từ tiếng Anh</label>
-                                <input value={en} onChange={e => setEn(e.target.value)} placeholder="VD: umbrella"
+                                <label className="block text-sm font-semibold text-gray-600 mb-1">Từ tiếng Anh <span className="text-gray-400 font-normal">(để trống để tự động dịch từ ô Tiếng Việt)</span></label>
+                                <input value={en} onChange={e => { setEn(e.target.value); setAutoFilledEn(false); }} placeholder="VD: umbrella — hoặc để trống"
                                     className="w-full p-3 border-2 border-gray-200 rounded-xl outline-none focus:border-indigo-500 transition-colors" />
+                                {autoFilledEn && <p className="mt-1 text-xs text-emerald-600"><i className="fas fa-wand-magic-sparkles mr-1"></i>Đã tự động dịch từ tiếng Việt, bạn có thể sửa lại nếu cần.</p>}
                             </div>
                             <div>
                                 <label className="block text-sm font-semibold text-gray-600 mb-1">Nghĩa tiếng Việt <span className="text-gray-400 font-normal">(để trống để tự động dịch)</span></label>
-                                <input value={vi} onChange={e => setVi(e.target.value)} placeholder="VD: Cái ô / cây dù — hoặc để trống"
+                                <input value={vi} onChange={e => setVi(e.target.value)} onBlur={handleViBlur} placeholder="VD: Cái ô / cây dù — hoặc để trống"
                                     className="w-full p-3 border-2 border-gray-200 rounded-xl outline-none focus:border-indigo-500 transition-colors" />
+                                <p className="mt-1 text-xs text-gray-400">Nhập tiếng Việt và để trống ô Tiếng Anh ở trên — hệ thống sẽ tự dịch sang tiếng Anh và tạo câu hỏi theo đúng cấu trúc.</p>
                             </div>
                             <div>
                                 <label className="block text-sm font-semibold text-gray-600 mb-1">Gợi ý (không bắt buộc)</label>
@@ -541,7 +568,7 @@
                                     className="w-full p-3 border-2 border-gray-200 rounded-xl outline-none focus:border-indigo-500 transition-colors" />
                             </div>
 
-                            <button type="submit" disabled={!en.trim() || translating}
+                            <button type="submit" disabled={(!en.trim() && !vi.trim()) || translating}
                                 className="w-full py-3 rounded-xl font-bold text-white bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 shadow-lg transition-all active:scale-95 disabled:opacity-60">
                                 {translating ? <span><i className="fas fa-spinner fa-spin mr-2"></i>Đang tự động dịch...</span> :
                                  justAdded ? <span><i className="fas fa-check mr-2"></i>Đã thêm!</span> :
@@ -605,7 +632,7 @@
                 setError("");
                 const cleanRows = rows
                     .map(r => ({ en: r.en.trim(), vi: r.vi.trim(), hint: r.hint.trim() }))
-                    .filter(r => r.en);
+                    .filter(r => r.en || r.vi);
 
                 if (!name.trim()) { setError("Vui lòng đặt tên cho bộ đề."); return; }
                 if (cleanRows.length < 2) { setError("Cần ít nhất 2 từ để tạo bộ đề."); return; }
@@ -613,12 +640,19 @@
 
                 setSaving(true);
                 const finalRows = await Promise.all(cleanRows.map(async (r) => {
+                    let en = r.en;
                     let vi = r.vi;
-                    if (!vi) {
-                        vi = await autoTranslate(r.en);
-                        if (!vi) vi = r.en;
+                    // Ô Tiếng Anh trống -> tự động chuyển đổi từ Tiếng Việt sang Tiếng Anh và tạo câu hỏi theo đúng cấu trúc
+                    if (!en && vi) {
+                        en = await autoTranslate(vi, 'vi-en');
+                        if (!en) en = vi;
                     }
-                    return { en: r.en, vi, hint: r.hint || generateHint(r.en) };
+                    // Ô Tiếng Việt trống -> tự động dịch từ Tiếng Anh sang Tiếng Việt (như cũ)
+                    if (!vi && en) {
+                        vi = await autoTranslate(en, 'en-vi');
+                        if (!vi) vi = en;
+                    }
+                    return { en, vi, hint: r.hint || generateHint(en) };
                 }));
                 setSaving(false);
 
@@ -664,11 +698,11 @@
                                     <i className="fas fa-plus mr-1"></i>Thêm dòng
                                 </button>
                             </div>
-                            <p className="text-xs text-gray-400 mb-2">Bỏ trống ô Tiếng Việt để hệ thống tự động dịch khi lưu.</p>
+                            <p className="text-xs text-gray-400 mb-2">Chỉ cần nhập 1 trong 2 ô (Anh hoặc Việt) — hệ thống sẽ tự động dịch chiều còn lại khi lưu.</p>
                             <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
                                 {rows.map((row, idx) => (
                                     <div key={idx} className="grid grid-cols-[1fr_1fr_auto] gap-2 items-center bg-gray-50 p-2 rounded-xl">
-                                        <input value={row.en} onChange={e => updateRow(idx, 'en', e.target.value)} placeholder="Tiếng Anh"
+                                        <input value={row.en} onChange={e => updateRow(idx, 'en', e.target.value)} placeholder="Tiếng Anh (để trống = tự dịch)"
                                             className="p-2 border border-gray-200 rounded-lg outline-none focus:border-rose-400 text-sm" />
                                         <input value={row.vi} onChange={e => updateRow(idx, 'vi', e.target.value)} placeholder="Tiếng Việt (để trống = tự dịch)"
                                             className="p-2 border border-gray-200 rounded-lg outline-none focus:border-rose-400 text-sm" />
